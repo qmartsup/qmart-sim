@@ -257,11 +257,33 @@
 
     #video {
       width: 100%;
-      display: block;
+      display: none;
       max-height: 240px;
       object-fit: cover;
       background: #000;
     }
+    #quagga-container {
+      width: 100%;
+      display: none;
+      position: relative;
+      background: #000;
+      min-height: 240px;
+      overflow: hidden;
+    }
+    #quagga-container video {
+      width: 100% !important;
+      height: auto !important;
+      max-height: 240px;
+      display: block;
+      object-fit: cover;
+    }
+    #quagga-container canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100% !important;
+      height: 100% !important;
+    }
+    .drawingBuffer { display: none; }
     .scan-overlay {
       position: absolute;
       top: 50%; left: 50%;
@@ -675,6 +697,7 @@
         <button class="camera-toggle" onclick="toggleCamera()" id="cameraToggle">▶ Start Camera</button>
       </div>
       <video id="video" playsinline autoplay muted></video>
+      <div id="quagga-container"></div>
       <div class="scan-overlay" id="scanOverlay" style="display:none"></div>
     </div>
     <div class="strip-qty-row">
@@ -881,20 +904,31 @@ function startScan(target) {
 
 function initScanner() {
   loadQuagga(() => {
-    const videoEl = document.getElementById('video');
-    videoEl.style.display = 'block';
-    document.getElementById('scanOverlay').style.display = 'block';
+    // Show the scanner wrapper
+    document.getElementById('scanOverlay').style.display = 'none'; // Quagga draws its own
     document.getElementById('stripDot').classList.add('live');
     document.getElementById('cameraToggle').textContent = '■ Stop Camera';
+
+    // Hide our plain video element — Quagga creates its own inside #quagga-container
+    document.getElementById('video').style.display = 'none';
+    document.getElementById('quagga-container').style.display = 'block';
     scanning = true;
 
     Quagga.init({
       inputStream: {
         name: 'Live',
         type: 'LiveStream',
-        target: videoEl,
-        constraints: { facingMode: 'environment' },
+        target: document.getElementById('quagga-container'),
+        constraints: {
+          width: { min: 640 },
+          height: { min: 480 },
+          facingMode: 'environment',
+          aspectRatio: { min: 1, max: 2 }
+        },
       },
+      locator: { patchSize: 'medium', halfSample: true },
+      numOfWorkers: 0,
+      frequency: 10,
       decoder: {
         readers: ['code_128_reader', 'code_39_reader', 'ean_reader', 'ean_8_reader', 'upc_reader', 'i2of5_reader']
       },
@@ -902,6 +936,7 @@ function initScanner() {
     }, (err) => {
       if (err) {
         console.warn('Quagga init failed, trying fallback:', err);
+        document.getElementById('quagga-container').style.display = 'none';
         startCameraFallback();
         return;
       }
@@ -918,16 +953,27 @@ function initScanner() {
   });
 }
 
-// Fallback: raw getUserMedia + BarcodeDetector (Android Chrome) or manual prompt (iOS)
+// Fallback: raw getUserMedia + BarcodeDetector (Android) or manual prompt (iOS)
 async function startCameraFallback() {
   try {
     videoStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' } }
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
     });
     const videoEl = document.getElementById('video');
+    videoEl.setAttribute('playsinline', '');  // Critical for iOS Safari
+    videoEl.setAttribute('autoplay', '');
+    videoEl.setAttribute('muted', '');
+    videoEl.muted = true;
     videoEl.srcObject = videoStream;
     videoEl.style.display = 'block';
-    await videoEl.play();
+
+    // iOS requires play() to be called after srcObject is set
+    try { await videoEl.play(); } catch(pe) { console.warn('play() error:', pe); }
+
     scanning = true;
     document.getElementById('stripDot').classList.add('live');
 
@@ -944,14 +990,27 @@ async function startCameraFallback() {
         } catch(e) {}
       }, 500);
     } else {
-      // iOS Safari — no BarcodeDetector, show manual input
-      stopCamera();
-      const val = prompt('Camera scanning not supported on this browser.\n\nPlease type the barcode or ICCID number:');
-      if (val && val.trim()) handleScannedValue(val.trim());
+      // iOS Safari has no BarcodeDetector — offer manual type-in
+      // Keep camera live as visual feedback, overlay a manual input button
+      showManualEntryOverlay();
     }
   } catch(e) {
     scanning = false;
-    showToast('Camera access denied. Allow camera in iPhone Settings → Safari → Camera.', true);
+    console.error('Camera fallback error:', e);
+    showToast('Camera blocked. Go to Settings → Safari → Camera → Allow', true);
+    // Still offer manual entry
+    const val = prompt('Enter barcode or ICCID manually:');
+    if (val && val.trim()) handleScannedValue(val.trim());
+  }
+}
+
+function showManualEntryOverlay() {
+  // Show a prompt over the (live) camera view for iOS users
+  const val = prompt('Tap OK then type or paste the barcode / ICCID number:');
+  if (val && val.trim()) {
+    handleScannedValue(val.trim());
+  } else {
+    stopCamera();
   }
 }
 
@@ -966,6 +1025,9 @@ function stopCamera() {
   videoEl.style.display = 'none';
   try { videoEl.srcObject = null; } catch(e) {}
   document.getElementById('scanOverlay').style.display = 'none';
+  document.getElementById('quagga-container').style.display = 'none';
+  // Clear quagga container contents to reset for next use
+  document.getElementById('quagga-container').innerHTML = '';
   document.getElementById('stripDot').classList.remove('live');
   document.getElementById('cameraToggle').textContent = '▶ Start Camera';
   scanning = false;

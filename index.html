@@ -854,86 +854,126 @@ function changeQty(delta) {
   document.getElementById('stripQty').textContent = stripQtyVal;
 }
 
-// ─── Camera / Scanner ─────────────────────────────────────────────────────────
-function toggleCamera() {
-  if (scanning) {
-    stopCamera();
-  } else {
-    startCamera();
-  }
+// ─── Camera / Scanner (iOS Safari + Android Chrome compatible) ────────────────
+
+function loadQuagga(callback) {
+  if (window.Quagga) { callback(); return; }
+  const script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.4.2/dist/quagga.min.js';
+  script.onload = callback;
+  script.onerror = () => {
+    showToast('Scanner library failed, trying fallback...', true);
+    startCameraFallback();
+  };
+  document.head.appendChild(script);
 }
 
-async function startCamera() {
-  try {
-    videoStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-    });
-    const video = document.getElementById('video');
-    video.srcObject = videoStream;
-    video.style.display = 'block';
+function toggleCamera() {
+  if (scanning) { stopCamera(); } else { initScanner(); }
+}
+
+function startScan(target) {
+  scanTarget = target;
+  // Temporarily show strip section to house the video element for ICCID scanning
+  document.getElementById('stripSection').style.display = 'block';
+  initScanner();
+}
+
+function initScanner() {
+  loadQuagga(() => {
+    const videoEl = document.getElementById('video');
+    videoEl.style.display = 'block';
     document.getElementById('scanOverlay').style.display = 'block';
     document.getElementById('stripDot').classList.add('live');
     document.getElementById('cameraToggle').textContent = '■ Stop Camera';
     scanning = true;
 
-    // Load ZXing for barcode decoding
-    loadZXing();
+    Quagga.init({
+      inputStream: {
+        name: 'Live',
+        type: 'LiveStream',
+        target: videoEl,
+        constraints: { facingMode: 'environment' },
+      },
+      decoder: {
+        readers: ['code_128_reader', 'code_39_reader', 'ean_reader', 'ean_8_reader', 'upc_reader', 'i2of5_reader']
+      },
+      locate: true,
+    }, (err) => {
+      if (err) {
+        console.warn('Quagga init failed, trying fallback:', err);
+        startCameraFallback();
+        return;
+      }
+      Quagga.start();
+    });
+
+    Quagga.onDetected((result) => {
+      const code = result && result.codeResult && result.codeResult.code;
+      if (code) {
+        if (navigator.vibrate) navigator.vibrate(100);
+        handleScannedValue(code);
+      }
+    });
+  });
+}
+
+// Fallback: raw getUserMedia + BarcodeDetector (Android Chrome) or manual prompt (iOS)
+async function startCameraFallback() {
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } }
+    });
+    const videoEl = document.getElementById('video');
+    videoEl.srcObject = videoStream;
+    videoEl.style.display = 'block';
+    await videoEl.play();
+    scanning = true;
+    document.getElementById('stripDot').classList.add('live');
+
+    if ('BarcodeDetector' in window) {
+      const bd = new BarcodeDetector({ formats: ['code_128', 'code_39', 'ean_13', 'qr_code'] });
+      scanInterval = setInterval(async () => {
+        if (!scanning || videoEl.readyState < 2) return;
+        try {
+          const barcodes = await bd.detect(videoEl);
+          if (barcodes.length > 0) {
+            if (navigator.vibrate) navigator.vibrate(100);
+            handleScannedValue(barcodes[0].rawValue);
+          }
+        } catch(e) {}
+      }, 500);
+    } else {
+      // iOS Safari — no BarcodeDetector, show manual input
+      stopCamera();
+      const val = prompt('Camera scanning not supported on this browser.\n\nPlease type the barcode or ICCID number:');
+      if (val && val.trim()) handleScannedValue(val.trim());
+    }
   } catch(e) {
-    showToast('Camera access denied', true);
+    scanning = false;
+    showToast('Camera access denied. Allow camera in iPhone Settings → Safari → Camera.', true);
   }
 }
 
 function stopCamera() {
+  try { if (window.Quagga) Quagga.stop(); } catch(e) {}
   if (videoStream) {
     videoStream.getTracks().forEach(t => t.stop());
     videoStream = null;
   }
   if (scanInterval) { clearInterval(scanInterval); scanInterval = null; }
-  document.getElementById('video').style.display = 'none';
+  const videoEl = document.getElementById('video');
+  videoEl.style.display = 'none';
+  try { videoEl.srcObject = null; } catch(e) {}
   document.getElementById('scanOverlay').style.display = 'none';
   document.getElementById('stripDot').classList.remove('live');
   document.getElementById('cameraToggle').textContent = '▶ Start Camera';
   scanning = false;
-}
-
-function loadZXing() {
-  if (window.ZXing) { startDecoding(); return; }
-  const script = document.createElement('script');
-  script.src = 'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.4/esm/index.min.js';
-  script.type = 'module';
-  // Fallback: use canvas-based approach with a simpler library
-  document.head.appendChild(script);
-
-  // Use Quagga or manual decode attempt via canvas
-  startDecodingFallback();
-}
-
-function startDecodingFallback() {
-  const video = document.getElementById('video');
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-
-  scanInterval = setInterval(() => {
-    if (!scanning || video.readyState < 2) return;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
-    // If BarcodeDetector available (Chrome/Android)
-    if ('BarcodeDetector' in window) {
-      const bd = new BarcodeDetector({ formats: ['code_128', 'code_39', 'ean_13', 'qr_code', 'data_matrix'] });
-      bd.detect(canvas).then(barcodes => {
-        if (barcodes.length > 0) {
-          handleScannedValue(barcodes[0].rawValue);
-        }
-      }).catch(() => {});
-    }
-  }, 500);
-}
-
-function startScan(target) {
-  scanTarget = target;
-  // For ICCID fields, use camera + BarcodeDetector
-  startCamera();
+  // Hide strip section if we only opened it for ICCID scanning
+  if (scanTarget === 'first' || scanTarget === 'last') {
+    if (selectedBoxType !== 'strip') document.getElementById('stripSection').style.display = 'none';
+  }
+  scanTarget = null;
 }
 
 function handleScannedValue(val) {
@@ -942,14 +982,15 @@ function handleScannedValue(val) {
     document.getElementById('firstICCID').value = clean;
     validateICCID(document.getElementById('firstICCID'), 'firstCount');
     stopCamera();
+    showToast('✓ First ICCID scanned');
   } else if (scanTarget === 'last') {
     document.getElementById('lastICCID').value = clean;
     validateICCID(document.getElementById('lastICCID'), 'lastCount');
     stopCamera();
+    showToast('✓ Last ICCID scanned');
   } else {
-    // strip scan — log and keep scanning
     stopCamera();
-    logEntry('strip', null, null, 1, val);
+    logEntry('strip', null, null, stripQtyVal, val);
   }
 }
 
@@ -1049,6 +1090,7 @@ function updateSubmitBar() {
 }
 
 // ─── Submit to Google Sheets ──────────────────────────────────────────────────
+// Google Apps Script requires no-cors — we POST as FormData
 async function submitAll() {
   const pending = entries.filter(e => e.status === 'pending');
   if (pending.length === 0) return;
@@ -1064,24 +1106,26 @@ async function submitAll() {
   btn.disabled = true;
 
   try {
-    const resp = await fetch(SHEETS_URL, {
+    // Use no-cors + FormData — required for Google Apps Script from external origins
+    const formData = new FormData();
+    formData.append('payload', JSON.stringify({ entries: pending }));
+
+    await fetch(SHEETS_URL, {
       method: 'POST',
-      body: JSON.stringify({ entries: pending }),
-      headers: { 'Content-Type': 'application/json' }
+      mode: 'no-cors',
+      body: formData
     });
-    const result = await resp.json();
-    if (result.success) {
-      pending.forEach(e => { e.status = 'submitted'; });
-      localStorage.setItem('qmart_entries', JSON.stringify(entries));
-      renderLog();
-      updateSubmitBar();
-      showToast(`✅ ${pending.length} entries submitted!`);
-    } else {
-      throw new Error(result.error || 'Unknown error');
-    }
+
+    // With no-cors we cannot read the response, so we assume success on no network error
+    pending.forEach(e => { e.status = 'submitted'; });
+    localStorage.setItem('qmart_entries', JSON.stringify(entries));
+    renderLog();
+    updateSubmitBar();
+    showToast('✅ ' + pending.length + ' entries submitted!');
+
   } catch(err) {
-    console.error(err);
-    showToast('Submission failed. Check connection.', true);
+    console.error('Submission error:', err);
+    showToast('Network error. Check your internet connection.', true);
   } finally {
     btn.textContent = '📤 SUBMIT TO GOOGLE SHEETS';
     btn.disabled = false;

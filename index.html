@@ -510,6 +510,33 @@
     /* Pending indicator */
     .pending-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent2); display: inline-block; animation: pulse 1s infinite; }
 
+    /* Pending log item */
+    .log-item-pending {
+      border-color: rgba(232,80,10,0.25);
+      background: var(--surface);
+    }
+    .log-item-pending:hover { border-color: rgba(217,48,37,0.4); }
+
+    /* Delete button */
+    .delete-btn {
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 16px;
+      cursor: pointer;
+      flex-shrink: 0;
+      opacity: 0.5;
+      transition: opacity .2s, border-color .2s, background .2s;
+      line-height: 1;
+    }
+    .delete-btn:hover {
+      opacity: 1;
+      background: rgba(217,48,37,0.08);
+      border-color: rgba(217,48,37,0.3);
+    }
+    .delete-btn:active { transform: scale(0.92); }
+
     /* Camera toggle */
     .camera-toggle {
       padding: 8px 12px;
@@ -1091,8 +1118,10 @@ function renderLog() {
   list.innerHTML = entries.slice(0, 50).map(e => {
     const time = new Date(e.timestamp).toLocaleTimeString('en-ZM', { hour: '2-digit', minute: '2-digit' });
     const iccidText = e.firstICCID ? `${e.firstICCID.slice(0,8)}…${e.lastICCID.slice(-8)}` : (e.barcode || `×${e.stripQty}`);
-    const statusIcon = e.status === 'submitted' ? '✅' : '<span class="pending-dot"></span>';
-    return `<div class="log-item">
+    const isPending = e.status === 'pending';
+    const statusIcon = isPending ? '<span class="pending-dot"></span>' : '✅';
+    const deleteBtn = isPending ? `<button class="delete-btn" onclick="deleteEntry(${e.id})" title="Delete entry">🗑</button>` : '';
+    return `<div class="log-item ${isPending ? 'log-item-pending' : ''}" id="entry-${e.id}">
       <div class="log-type-badge ${typeColors[e.boxType]}">${icons[e.boxType]}</div>
       <div class="log-info">
         <div class="log-type-name">${e.boxType.toUpperCase()} · ${e.totalSIMs.toLocaleString()} SIMs</div>
@@ -1100,8 +1129,29 @@ function renderLog() {
       </div>
       <div class="log-time">${time}</div>
       <div class="log-status">${statusIcon}</div>
+      ${deleteBtn}
     </div>`;
   }).join('');
+}
+
+function deleteEntry(id) {
+  const entry = entries.find(e => e.id === id);
+  if (!entry || entry.status === 'submitted') return;
+  if (!confirm(`Delete this entry?\n\n${entry.boxType.toUpperCase()} · ${entry.totalSIMs.toLocaleString()} SIMs`)) return;
+  entries = entries.filter(e => e.id !== id);
+  localStorage.setItem('qmart_entries', JSON.stringify(entries));
+  // Animate removal
+  const el = document.getElementById('entry-' + id);
+  if (el) {
+    el.style.transition = 'all 0.25s ease';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(40px)';
+    setTimeout(() => { renderLog(); updateSubmitBar(); }, 250);
+  } else {
+    renderLog();
+    updateSubmitBar();
+  }
+  showToast('Entry deleted');
 }
 
 function updateSubmitBar() {
